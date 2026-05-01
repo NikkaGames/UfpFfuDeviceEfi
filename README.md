@@ -34,10 +34,10 @@ The common extension dispatcher accepts:
 | `NOKXCB` | 12-byte status/specifier response | Accepts modes `R`, `T`, `U`, `W`, `Z`; unknown modes return status `8` and the mode as specifier |
 | `NOKXCC` | 8-byte status response | Clear-screen acknowledgement |
 | `NOKXCE` | `NOKXCE` plus echo bytes | Echoes up to the request length at bytes 6..9 from payload offset 10 |
-| `NOKXCD` | 12-byte status/length response | Directory-read frame shape, returns status `38` without platform filesystem backing |
-| `NOKXCF` | 12-byte status/length response | File-read frame shape, returns status `38` without platform filesystem backing |
+| `NOKXCD` | 12-byte status/length header plus requested payload length | Directory-read frame shape, returns status `38` without platform filesystem backing and status `48` when the requested read exceeds the recovered transfer limits |
+| `NOKXCF` | 12-byte status/length header plus requested payload length | File-read frame shape, returns status `38` without platform filesystem backing and status `48` when the requested read exceeds the recovered transfer limits |
 | `NOKXCM` | 8-byte status response | Display-message acknowledgement for ids `< 5`, otherwise status `11` |
-| `NOKXCP` | 12-byte status/length response | Put-file frame shape, returns status `38` without platform filesystem backing |
+| `NOKXCP` | 12-byte status/length response | Put-file frame shape, returns status `38` without platform filesystem backing, preserves the requested length field, and returns status `48` when the requested write exceeds the recovered transfer limits |
 
 ## Legacy Flash (`NOKF`)
 
@@ -174,7 +174,7 @@ Recovered parameter ids used by the USB FFU path:
 | Id | Meaning | Response data |
 | --- | --- | --- |
 | `ATRP` (`0x41545250`) | Reset-protection support/version | 9-byte support/version block |
-| `FAI\0` (`0x46414900`) | UFP version | 6 bytes: `02 03 03 05 00 04` |
+| `FAI\0` (`0x46414900`) | UFP version | 6 bytes: `02 03 03 05 04 00` |
 | `DAS\0` (`0x44415300`) | Direct async support | 2 bytes: `00 01` |
 | `APPT` (`0x41505054`) | App type | 1 byte: `01` |
 | `BF\0\0` (`0x42460000`) | Boot/flashing flag | 1-byte default `00` |

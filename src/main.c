@@ -333,6 +333,10 @@ static void wr_be64_local(uint8_t *p, uint64_t v) {
   wr_be32(p + 4, (uint32_t)v);
 }
 
+static uint64_t rd_be64_local(const uint8_t *p) {
+  return ((uint64_t)rd_be32(p) << 32) | (uint64_t)rd_be32(p + 4);
+}
+
 static UINTN info_add_block(uint8_t *resp, UINTN off, uint8_t id, const uint8_t *data, UINTN data_len) {
   resp[off + 0] = id;
   resp[off + 1] = (uint8_t)(data_len >> 8);
@@ -448,8 +452,8 @@ static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, EFI_BLOCK_IO_PROTOCOL *b
       data[1] = 3;
       data[2] = 3;
       data[3] = 5;
-      data[4] = 0;
-      data[5] = 4;
+      data[4] = 4;
+      data[5] = 0;
       data_len = 6;
       break;
     case 0x44415300U: /* DAS\0: direct async support. */
@@ -818,6 +822,59 @@ static EFI_STATUS handle_read_empty_log(USB_TRANSPORT *usb, uint8_t ext, uint32_
   return send_ext_blob_response(usb, 'F', ext, status, 0, 0);
 }
 
+static EFI_STATUS send_ext_declared_len_response(USB_TRANSPORT *usb, uint8_t app, uint8_t ext, uint16_t status, uint32_t declared_len) {
+  uint8_t resp[12];
+  memset(resp, 0, sizeof(resp));
+  resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = app; resp[5] = ext;
+  wr_be16(resp + 6, status);
+  wr_be32(resp + 8, declared_len);
+  return usb_transport_send(usb, resp, sizeof(resp));
+}
+
+static EFI_STATUS handle_common_ext_file_stub(USB_TRANSPORT *usb, const uint8_t *msg, UINTN len, uint8_t ext) {
+  uint32_t requested;
+  uint32_t max_payload;
+  uint64_t offset;
+  uint8_t *zeros;
+  EFI_STATUS st;
+
+  if (len < 1114 || (ext == 'P' && len < 1115)) {
+    return send_ext_blob_response(usb, 'C', ext, 8, 0, 0);
+  }
+
+  requested = rd_be32(msg + 1102);
+  offset = rd_be64_local(msg + 1106);
+  max_payload = ext == 'P' ? 0xfb94U : 0xffe3U;
+
+  if (requested > (uint32_t)usb->max_transfer || requested > max_payload) {
+    return send_ext_blob_response(usb, 'C', ext, 48, 0, 0);
+  }
+
+  if (ext == 'F' && !requested && offset) {
+    return send_ext_blob_response(usb, 'C', ext, 8, 0, 0);
+  }
+
+  if (ext == 'P') {
+    if (!requested || (uint64_t)len < 1115ULL + (uint64_t)requested) {
+      return send_ext_declared_len_response(usb, 'C', 'P', 8, 0);
+    }
+    return send_ext_declared_len_response(usb, 'C', 'P', 38, requested);
+  }
+
+  if (!requested) {
+    return send_ext_blob_response(usb, 'C', ext, 38, 0, 0);
+  }
+
+  zeros = (uint8_t *)uefi_alloc(requested);
+  if (!zeros) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  memset(zeros, 0, requested);
+  st = send_ext_blob_response(usb, 'C', ext, 38, zeros, requested);
+  uefi_free(zeros);
+  return st;
+}
+
 static EFI_STATUS handle_common_ext(USB_TRANSPORT *usb, const uint8_t *msg, UINTN len) {
   uint8_t ext = len > 5 ? msg[5] : 0;
   if (ext == 'B') {
@@ -870,7 +927,7 @@ static EFI_STATUS handle_common_ext(USB_TRANSPORT *usb, const uint8_t *msg, UINT
     return send_ext_status8(usb, 'C', 'M', display_id < 5 ? 0 : 11);
   }
   if (ext == 'D' || ext == 'F' || ext == 'P') {
-    return send_ext_blob_response(usb, 'C', ext, 38, 0, 0);
+    return handle_common_ext_file_stub(usb, msg, len, ext);
   }
   return send_unknown_response(usb);
 }
