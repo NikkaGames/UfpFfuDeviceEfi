@@ -939,6 +939,7 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
   uint8_t *header = 0;
   uint64_t header_size = 0;
   uint64_t header_cap = 0;
+  uint32_t header_v2_received = 0;
   int flash_ready = 0;
   uint32_t async_write_status = 0;
   uint32_t async_last_sector = 0xffffffffU;
@@ -1113,12 +1114,14 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
         uint32_t file_offset;
         uint32_t total_len;
         uint32_t data_offset;
+        uint32_t copy_offset;
         uint8_t options;
         uint8_t erase_options;
         uint64_t need;
         uint64_t complete_len;
+        int header_v2 = subblock == UFP_SEC_SUBBLOCK_HEADER_V2;
 
-        if (subblock == UFP_SEC_SUBBLOCK_HEADER_V1) {
+        if (!header_v2) {
           uint32_t subblock_len;
           if (len < 32) {
             send_fs_short(&usb, 8, (uint32_t)len);
@@ -1135,6 +1138,8 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
           data_offset = 32;
           options = msg[28];
           erase_options = msg[29];
+          copy_offset = 0;
+          header_v2_received = 0;
         } else {
           uint32_t absolute_header_offset;
           if (len < 60) {
@@ -1149,26 +1154,62 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
           data_offset = 60;
           options = msg[28];
           erase_options = msg[37];
+          copy_offset = header_v2_received;
         }
 
-        if ((options & 0xc0U) != 0) {
-          send_fs_short(&usb, 8, options);
+        if (header_v2 && (uint64_t)header_v2_received + chunk_len > total_len) {
+          send_fs_short(&usb, 16, chunk_len);
           continue;
         }
-        if (erase_options != 0) {
-          send_fs_short(&usb, 8, erase_options);
-          continue;
+
+        if (!header_v2) {
+          if ((options & 0xc0U) != 0) {
+            send_fs_short(&usb, 8, options);
+            continue;
+          }
+          if (erase_options != 0) {
+            send_fs_short(&usb, 8, erase_options);
+            continue;
+          }
+        } else if (options != 0) {
+          if ((options & 0xc0U) != 0) {
+            send_fs_short(&usb, 8, options);
+            continue;
+          }
+          if (erase_options != 0) {
+            send_fs_short(&usb, 8, erase_options);
+            continue;
+          }
         }
         if (chunk_len > UFP_MAX_HEADER_DATA || len < (UINTN)data_offset + chunk_len) {
           send_fs_short(&usb, 16, chunk_len);
           continue;
         }
-        need = (uint64_t)file_offset + chunk_len;
-        if (need < file_offset || (total_len && need > total_len)) {
-          send_fs_short(&usb, 16, chunk_len);
-          continue;
+
+        if (header_v2) {
+          if (file_offset == 0) {
+            if (!flash_ready && header) {
+              uefi_free(header);
+              header = 0;
+              header_size = 0;
+              header_cap = 0;
+            }
+            header_v2_received = 0;
+            copy_offset = 0;
+          } else if (!header) {
+            send_fs_short(&usb, 8, file_offset);
+            continue;
+          }
+          need = (uint64_t)header_v2_received + chunk_len;
+          complete_len = total_len;
+        } else {
+          need = (uint64_t)file_offset + chunk_len;
+          if (need < file_offset || (total_len && need > total_len)) {
+            send_fs_short(&usb, 16, chunk_len);
+            continue;
+          }
+          complete_len = total_len ? total_len : need;
         }
-        complete_len = total_len ? total_len : need;
         if (complete_len == 0) {
           complete_len = need;
         }
@@ -1193,9 +1234,14 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
           header = new_header;
           header_cap = new_cap;
         }
-        memcpy(header + file_offset, msg + data_offset, chunk_len);
+        if (chunk_len) {
+          memcpy(header + copy_offset, msg + data_offset, chunk_len);
+        }
         if (need > header_size) {
           header_size = need;
+        }
+        if (header_v2) {
+          header_v2_received = (uint32_t)need;
         }
         if (complete_len && header_size < complete_len) {
           send_fs_short(&usb, 0, 0);
@@ -1209,9 +1255,15 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
             ffu_print_summary(&flash.plan);
           } else {
             con_puta("FFU header parse failed: "); con_put_status(st); con_crlf();
+            if (header_v2) {
+              header_v2_received = 0;
+            }
             send_fs_short(&usb, status_from_efi(st), (uint32_t)st);
             continue;
           }
+        }
+        if (header_v2) {
+          header_v2_received = 0;
         }
         send_fs_short(&usb, 0, 0);
         continue;

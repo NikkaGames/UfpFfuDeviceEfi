@@ -89,6 +89,8 @@ Header V2 uses subblock id `0x00000021` and payload bytes at offset `60`:
 | 37 | 1 | Erase options, must be zero |
 | 60 | n | Header bytes |
 
+The recovered Header V2 receiver appends chunks at an internal receive index. A zero file offset starts a new header transfer, nonzero offsets require an existing partial header buffer, and an overrun of the total header length returns status `16` with the chunk length as specifier.
+
 Maximum recovered header data per packet: `0x1ffbdc`.
 
 ### Payload Request
