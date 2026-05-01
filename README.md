@@ -193,7 +193,7 @@ Recovered parameter ids used by the USB FFU path:
 | `FS\0\0` (`0x46530000`) | Flashing status | 4-byte default status `00000003` |
 | `FZ\0\0` (`0x465a0000`) | File size | Status `38`, 8-byte zero size without filesystem backing |
 | `GSBS` (`0x47534253`) | Secure boot status | 1-byte default `00` |
-| `GUFV`/`GUVS` | UEFI variable read/size | Status `10` when the requested variable is not available through this rewrite |
+| `GUFV`/`GUVS` | UEFI variable read/size | RuntimeServices `GetVariable` backing using GUID at bytes 15..30, declared/value size at bytes 31..34, UTF-16LE name length at bytes 35..38, and name bytes at byte 39 |
 | `LGMR`/`SOSM` | Memory information | Status `2`/`9`, 8-byte zero size without OEM memory-map helpers |
 | `LZ\0\0` (`0x4c5a0000`) | Log size | 8-byte zero size for known log types, status `8` for unknown log type |
 | `MAC\0` (`0x4d414300`) | MAC address | Status `8`, 1-byte zero without network protocol backing |
@@ -210,7 +210,7 @@ Recovered parameter ids used by the USB FFU path:
 | `pm\0\0` (`0x706d0000`) | Processor manufacturer | Status `2`, 1-byte zero without SMBIOS extraction |
 | `WBS\0` (`0x57425300`) | Write-buffer size | 4-byte payload limit |
 
-The write-parameter handler matches the recovered validation for the FFU path: `FO\0\0` requires exactly 500 bytes and updates the in-memory option buffer, `LI\0\0` requires a NUL-terminated string with length <= 200 and matching the declared length, and `MODE` requires byte 15 to be zero before accepting the 32-bit mode value at bytes 16..19. Known boot/UEFI mutation ids (`BOCL`, `BOF\0`, `BOL\0`, `OBU\0`, `SUFV`) return status `4` without the OEM boot-variable backend. Other ids return status `11`, matching the recovered "unknown action" path.
+The write-parameter handler matches the recovered validation for the FFU path: `FO\0\0` requires exactly 500 bytes and updates the in-memory option buffer, `LI\0\0` requires a NUL-terminated string with length <= 200 and matching the declared length, and `MODE` requires byte 15 to be zero before accepting the 32-bit mode value at bytes 16..19. `SUFV` is backed by RuntimeServices `SetVariable` using GUID at bytes 15..30, UTF-16LE name length at bytes 31..34, a fixed 512-byte name field at bytes 35..546, attributes at bytes 547..550, data length at bytes 551..554, and data at byte 555. Known boot mutation ids (`BOCL`, `BOF\0`, `BOL\0`, `OBU\0`) return status `4` without the OEM boot-variable backend. Other ids return status `11`, matching the recovered "unknown action" path.
 
 ## Unlock, Relock, Telemetry, And Logs
 

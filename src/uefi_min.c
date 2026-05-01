@@ -49,6 +49,10 @@ EFI_BOOT_SERVICES *uefi_bs(void) {
   return g_st ? g_st->BootServices : 0;
 }
 
+EFI_RUNTIME_SERVICES *uefi_rs(void) {
+  return g_st ? g_st->RuntimeServices : 0;
+}
+
 void *uefi_alloc(UINTN size) {
   void *ptr = 0;
   if (!size) {

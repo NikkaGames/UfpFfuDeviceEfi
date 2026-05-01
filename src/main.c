@@ -337,6 +337,136 @@ static uint64_t rd_be64_local(const uint8_t *p) {
   return ((uint64_t)rd_be32(p) << 32) | (uint64_t)rd_be32(p + 4);
 }
 
+static int alloc_uefi_var_name(const uint8_t *src, UINTN src_len, CHAR16 **out) {
+  CHAR16 *name;
+  if (!out || !src_len || (src_len & 1U) != 0 || src_len > 1024U) {
+    return 0;
+  }
+  name = (CHAR16 *)uefi_alloc(src_len + sizeof(CHAR16));
+  if (!name) {
+    return -1;
+  }
+  memcpy(name, src, src_len);
+  *out = name;
+  return 1;
+}
+
+static uint16_t read_var_status(EFI_STATUS st) {
+  if (st == EFI_NOT_FOUND) {
+    return 10;
+  }
+  return EFI_ERROR(st) ? 2 : 0;
+}
+
+static EFI_STATUS handle_read_uefi_var_size(USB_TRANSPORT *usb, uint32_t param, const uint8_t *msg, UINTN len) {
+  EFI_RUNTIME_SERVICES *rs = uefi_rs();
+  EFI_GUID guid;
+  CHAR16 *name = 0;
+  uint8_t data[4];
+  uint32_t name_len;
+  UINTN size = 0;
+  uint16_t status;
+  EFI_STATUS st;
+  int name_status;
+
+  if (!rs || !rs->GetVariable || len < 39) {
+    return send_fr_response(usb, param, 8, 0, 0);
+  }
+  name_len = rd_be32(msg + 35);
+  if ((uint64_t)len < 39ULL + name_len) {
+    return send_fr_response(usb, param, 8, 0, 0);
+  }
+  name_status = alloc_uefi_var_name(msg + 39, name_len, &name);
+  if (name_status <= 0) {
+    return send_fr_response(usb, param, name_status ? 1 : 8, 0, 0);
+  }
+  memcpy(&guid, msg + 15, sizeof(guid));
+  st = rs->GetVariable(name, &guid, 0, &size, 0);
+  if (st == EFI_BUFFER_TOO_SMALL) {
+    st = EFI_SUCCESS;
+  }
+  status = read_var_status(st);
+  wr_be32(data, (uint32_t)size);
+  uefi_free(name);
+  return send_fr_response(usb, param, status, status ? 0 : data, status ? 0 : sizeof(data));
+}
+
+static EFI_STATUS handle_read_uefi_var_value(USB_TRANSPORT *usb, uint32_t param, const uint8_t *msg, UINTN len) {
+  EFI_RUNTIME_SERVICES *rs = uefi_rs();
+  EFI_GUID guid;
+  CHAR16 *name = 0;
+  uint8_t *data = 0;
+  uint32_t requested_size;
+  uint32_t name_len;
+  uint32_t attributes = 0;
+  UINTN size;
+  uint16_t status;
+  EFI_STATUS st;
+  int name_status;
+
+  if (!rs || !rs->GetVariable || len < 39) {
+    return send_fr_response(usb, param, 8, 0, 0);
+  }
+  requested_size = rd_be32(msg + 31);
+  name_len = rd_be32(msg + 35);
+  if ((uint64_t)len < 39ULL + name_len || requested_size > 0x10000U) {
+    return send_fr_response(usb, param, 8, 0, 0);
+  }
+  if (usb->max_transfer <= 25U || requested_size > (uint32_t)(usb->max_transfer - 25U)) {
+    return send_fr_response(usb, param, 48, 0, 0);
+  }
+  name_status = alloc_uefi_var_name(msg + 39, name_len, &name);
+  if (name_status <= 0) {
+    return send_fr_response(usb, param, name_status ? 1 : 8, 0, 0);
+  }
+  data = (uint8_t *)uefi_alloc((UINTN)requested_size + 8U);
+  if (!data) {
+    uefi_free(name);
+    return send_fr_response(usb, param, 1, 0, 0);
+  }
+  memcpy(&guid, msg + 15, sizeof(guid));
+  size = requested_size;
+  st = rs->GetVariable(name, &guid, &attributes, &size, requested_size ? data + 8 : 0);
+  status = read_var_status(st);
+  if (!status) {
+    wr_be32(data, attributes);
+    wr_be32(data + 4, (uint32_t)size);
+  }
+  uefi_free(name);
+  st = send_fr_response(usb, param, status, status ? 0 : data, status ? 0 : size + 8U);
+  uefi_free(data);
+  return st;
+}
+
+static EFI_STATUS handle_write_uefi_var(USB_TRANSPORT *usb, uint32_t param, const uint8_t *msg, UINTN len) {
+  EFI_RUNTIME_SERVICES *rs = uefi_rs();
+  EFI_GUID guid;
+  CHAR16 *name = 0;
+  uint32_t name_len;
+  uint32_t attributes;
+  uint32_t value_len;
+  EFI_STATUS st;
+  int name_status;
+
+  if (!rs || !rs->SetVariable || len < 555) {
+    return send_fw_response(usb, param, 8);
+  }
+  name_len = rd_be32(msg + 31);
+  attributes = rd_be32(msg + 547);
+  value_len = rd_be32(msg + 551);
+  if (name_len > 512U || value_len > 0x10000U || (uint64_t)len < 555ULL + value_len) {
+    return send_fw_response(usb, param, 8);
+  }
+  name_status = alloc_uefi_var_name(msg + 35, name_len, &name);
+  if (name_status <= 0) {
+    return send_fw_response(usb, param, name_status ? 1 : 8);
+  }
+  memcpy(&guid, msg + 15, sizeof(guid));
+  st = rs->SetVariable(name, &guid, attributes, value_len, value_len ? (void *)(msg + 555) : 0);
+  uefi_free(name);
+  return send_fw_response(usb, param, EFI_ERROR(st) ? 4 : 0);
+}
+
 static UINTN info_add_block(uint8_t *resp, UINTN off, uint8_t id, const uint8_t *data, UINTN data_len) {
   resp[off + 0] = id;
   resp[off + 1] = (uint8_t)(data_len >> 8);
@@ -534,9 +664,9 @@ static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, EFI_BLOCK_IO_PROTOCOL *b
       data_len = 1;
       break;
     case 0x47554656U: /* GUFV: get UEFI variable value. */
+      return handle_read_uefi_var_value(usb, param, msg, len);
     case 0x47555653U: /* GUVS: get UEFI variable size. */
-      status = 10;
-      break;
+      return handle_read_uefi_var_size(usb, param, msg, len);
     case 0x4C474D52U: /* LGMR: largest memory region. */
       status = 2;
       wr_be64_local(data, 0);
@@ -659,7 +789,6 @@ static EFI_STATUS handle_write_param(USB_TRANSPORT *usb, const uint8_t *msg, UIN
     case 0x424F4600U: /* BOF\0: move boot option first. */
     case 0x424F4C00U: /* BOL\0: move boot option last. */
     case 0x4F425500U: /* OBU\0: one-time boot option. */
-    case 0x53554656U: /* SUFV: set UEFI variable. */
       return send_fw_response(usb, param, 4);
     case 0x464F0000U: /* FO\0\0: FFU configuration options. */
       if (len < 515 || data_len != 500) {
@@ -667,6 +796,8 @@ static EFI_STATUS handle_write_param(USB_TRANSPORT *usb, const uint8_t *msg, UIN
       }
       memcpy(g_ffu_options, msg + 15, sizeof(g_ffu_options));
       return send_fw_response(usb, param, 0);
+    case 0x53554656U: /* SUFV: set UEFI variable. */
+      return handle_write_uefi_var(usb, param, msg, len);
     case 0x4C490000U: { /* LI\0\0: log identifier. */
       UINTN actual = 0;
       if (len < 15 || data_len > 200 || len < 15U + data_len) {

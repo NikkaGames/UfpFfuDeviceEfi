@@ -12,6 +12,7 @@ void uefi_free(void *ptr);
 void uefi_set_system_table(EFI_SYSTEM_TABLE *st);
 EFI_SYSTEM_TABLE *uefi_system_table(void);
 EFI_BOOT_SERVICES *uefi_bs(void);
+EFI_RUNTIME_SERVICES *uefi_rs(void);
 
 void con_puts(const CHAR16 *s);
 void con_puta(const char *s);

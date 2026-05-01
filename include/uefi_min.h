@@ -162,6 +162,24 @@ struct EFI_BOOT_SERVICES {
 
 typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *Protocol, void *Registration, void **Interface);
 
+struct EFI_RUNTIME_SERVICES {
+  EFI_TABLE_HEADER Hdr;
+  void *GetTime;
+  void *SetTime;
+  void *GetWakeupTime;
+  void *SetWakeupTime;
+  void *SetVirtualAddressMap;
+  void *ConvertPointer;
+  EFI_STATUS (EFIAPI *GetVariable)(CHAR16 *VariableName, EFI_GUID *VendorGuid, uint32_t *Attributes, UINTN *DataSize, void *Data);
+  void *GetNextVariableName;
+  EFI_STATUS (EFIAPI *SetVariable)(CHAR16 *VariableName, EFI_GUID *VendorGuid, uint32_t Attributes, UINTN DataSize, void *Data);
+  void *GetNextHighMonotonicCount;
+  void *ResetSystem;
+  void *UpdateCapsule;
+  void *QueryCapsuleCapabilities;
+  void *QueryVariableInfo;
+};
+
 typedef struct {
   EFI_TABLE_HEADER Hdr;
   CHAR16 *FirmwareVendor;
