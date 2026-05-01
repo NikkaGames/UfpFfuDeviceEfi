@@ -1,7 +1,5 @@
 # UFP FFU Flash Protocol Notes
 
-This is the cleaned protocol recovered from the decompiled ARM64 UEFI app in `../ufpdevicefw.c`.
-
 ## Common Framing
 
 Extended packets start with ASCII `NOKX`. Multi-byte UFP protocol fields are big-endian. The original FFU file structures remain little-endian. Unknown `NOK*` requests return `NOKU`.
