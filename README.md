@@ -25,6 +25,20 @@ The response is `NOKXCB`, followed by:
 
 On device-side request handling, byte 6 selects the mode. Recovered values include `R`, `T`, `U`, `W`, and `Z`.
 
+## Common Extension Requests (`NOKXC*`)
+
+The common extension dispatcher accepts:
+
+| Request | Response | Implemented behavior |
+| --- | --- | --- |
+| `NOKXCB` | 12-byte status/specifier response | Accepts modes `R`, `T`, `U`, `W`, `Z`; unknown modes return status `8` and the mode as specifier |
+| `NOKXCC` | 8-byte status response | Clear-screen acknowledgement |
+| `NOKXCE` | `NOKXCE` plus echo bytes | Echoes up to the request length at bytes 6..9 from payload offset 10 |
+| `NOKXCD` | 12-byte status/length response | Directory-read frame shape, returns status `38` without platform filesystem backing |
+| `NOKXCF` | 12-byte status/length response | File-read frame shape, returns status `38` without platform filesystem backing |
+| `NOKXCM` | 8-byte status response | Display-message acknowledgement for ids `< 5`, otherwise status `11` |
+| `NOKXCP` | 12-byte status/length response | Put-file frame shape, returns status `38` without platform filesystem backing |
+
 ## Legacy Flash (`NOKF`)
 
 The top-level dispatcher also supports legacy direct flash packets:
@@ -159,16 +173,57 @@ Recovered parameter ids used by the USB FFU path:
 
 | Id | Meaning | Response data |
 | --- | --- | --- |
+| `ATRP` (`0x41545250`) | Reset-protection support/version | 9-byte support/version block |
 | `FAI\0` (`0x46414900`) | UFP version | 6 bytes: `02 03 03 05 00 04` |
 | `DAS\0` (`0x44415300`) | Direct async support | 2 bytes: `00 01` |
 | `APPT` (`0x41505054`) | App type | 1 byte: `01` |
+| `BF\0\0` (`0x42460000`) | Boot/flashing flag | 1-byte default `00` |
+| `BITL` (`0x4249544c`) | BitLocker state | Status `2`, 1-byte zero state without OEM backing |
+| `BNFO` (`0x424e464f`) | Build info | NUL-terminated `Date:- Time:- Info:-` |
+| `CUFO` (`0x4355464f`) | Current boot option | Status `2`, 2-byte zero boot option without OEM backing |
+| `DES\0` (`0x44455300`) | Directory entry size | Status `38`, 8-byte zero size without filesystem backing |
+| `DPI\0`/`DPR\0`/`DTI\0` | Platform/device info | Status `2` without OEM SMBIOS/platform helpers |
+| `DTSP`/`EMWS` | Verify/write speed | 4-byte zero speed counters |
+| `DUI\0`/`SN\0\0` | Device/serial GUID | Status `2`, 16 zero bytes without OEM identity helpers |
+| `EMMT` (`0x454d4d54`) | eMMC test result | Status `9` without the OEM memory-card protocol |
+| `EMS\0` (`0x454d5300`) | eMMC sector count | 4-byte sector count from selected Block I/O target |
+| `FO\0\0` (`0x464f0000`) | FFU options | 500-byte option buffer, persisted from `NOKXFW FO\0\0` |
+| `FS\0\0` (`0x46530000`) | Flashing status | 4-byte default status `00000003` |
+| `FZ\0\0` (`0x465a0000`) | File size | Status `38`, 8-byte zero size without filesystem backing |
+| `GSBS` (`0x47534253`) | Secure boot status | 1-byte default `00` |
+| `GUFV`/`GUVS` | UEFI variable read/size | Status `10` when the requested variable is not available through this rewrite |
+| `LGMR`/`SOSM` | Memory information | Status `2`/`9`, 8-byte zero size without OEM memory-map helpers |
+| `LZ\0\0` (`0x4c5a0000`) | Log size | 8-byte zero size for known log types, status `8` for unknown log type |
+| `MAC\0` (`0x4d414300`) | MAC address | Status `8`, 1-byte zero without network protocol backing |
+| `MODE` (`0x4d4f4445`) | Transport/application mode | 4-byte mode flag persisted from `NOKXFW MODE` |
+| `SDS\0` (`0x53445300`) | SD/memory-card sector count | Status `10` with a zero 4-byte count when no memory-card target is present |
 | `SFPI` (`0x53465049`) | Supported secure-FFU protocols | 6 bytes: protocol format `1`, bitmap `0x001f`, trailing zeros |
+| `SMBD` (`0x534d4244`) | SMBIOS data | Status `2`, 4-byte zero length without SMBIOS extraction |
 | `SS\0\0` (`0x53530000`) | Security/SFFU/USB summary | 8 bytes with PSB/SFFU placeholders and current USB speed |
+| `TELS` (`0x54454c53`) | Telemetry log size | 4-byte zero length |
 | `TS\0\0` (`0x54530000`) | Transfer size | 4-byte transport receive size |
+| `UBF\0`/`UEBO` | UEFI boot option enumeration | Status `2`, zero count/size without boot-option mutation backing |
+| `UKID`/`UKTF` | Unlock id/token files | Status `10` without OEM unlock variables |
 | `USBS` (`0x55534253`) | USB speed | 2 bytes: current and maximum speed |
+| `pm\0\0` (`0x706d0000`) | Processor manufacturer | Status `2`, 1-byte zero without SMBIOS extraction |
 | `WBS\0` (`0x57425300`) | Write-buffer size | 4-byte payload limit |
 
-The write-parameter handler matches the recovered validation for the FFU path: `FO\0\0` requires exactly 500 bytes, `LI\0\0` requires a NUL-terminated string with length <= 200 and matching the declared length, and `MODE` requires byte 15 to be zero before accepting the 32-bit mode value at bytes 16..19. Other ids return status `11`, matching the recovered "unknown action" path.
+The write-parameter handler matches the recovered validation for the FFU path: `FO\0\0` requires exactly 500 bytes and updates the in-memory option buffer, `LI\0\0` requires a NUL-terminated string with length <= 200 and matching the declared length, and `MODE` requires byte 15 to be zero before accepting the 32-bit mode value at bytes 16..19. Known boot/UEFI mutation ids (`BOCL`, `BOF\0`, `BOL\0`, `OBU\0`, `SUFV`) return status `4` without the OEM boot-variable backend. Other ids return status `11`, matching the recovered "unknown action" path.
+
+## Unlock, Relock, Telemetry, And Logs
+
+The UFP extension dispatcher also recognizes non-FFU operations around service unlock/relock and logs:
+
+| Request | Response shape |
+| --- | --- |
+| `NOKS` | Telemetry start; original returns no response body |
+| `NOKN` | Telemetry end; original returns no response body |
+| `NOKXFI` | 14 bytes: `NOKXFI`, reserved bytes 6..7, UFP status at 8..9, EFI status at 10..13 |
+| `NOKXFO` | 10 bytes: `NOKXFO`, EFI status at 6..9 |
+| `NOKXFT` | 12-byte status/length header plus telemetry payload |
+| `NOKXFX` | 12-byte status/length header plus log payload |
+
+This rewrite matches those frame layouts. It validates unlock request version `2` and token length, acknowledges relock, and returns empty telemetry/log payloads unless the request size exceeds the recovered transport limits, in which case status `48` is returned.
 
 ## FFU Parsing
 

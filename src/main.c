@@ -15,6 +15,9 @@ typedef struct {
   UINTN path_len;
 } OPTIONS;
 
+static uint8_t g_ffu_options[500];
+static uint32_t g_mode_data;
+
 static int ch_is_space(CHAR16 ch) {
   return ch == (CHAR16)' ' || ch == (CHAR16)'\t' || ch == (CHAR16)'\r' || ch == (CHAR16)'\n';
 }
@@ -256,12 +259,50 @@ static EFI_STATUS send_cb_response(USB_TRANSPORT *usb, uint16_t status, uint32_t
   return usb_transport_send(usb, resp, sizeof(resp));
 }
 
-static EFI_STATUS send_fr_response(USB_TRANSPORT *usb, uint32_t param, uint16_t status, const uint8_t *data, UINTN data_len) {
-  uint8_t resp[64];
-  if (17U + data_len > sizeof(resp)) {
-    return EFI_INVALID_PARAMETER;
+static EFI_STATUS send_ext_status8(USB_TRANSPORT *usb, uint8_t app, uint8_t ext, uint16_t status) {
+  uint8_t resp[8];
+  resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = app; resp[5] = ext;
+  wr_be16(resp + 6, status);
+  return usb_transport_send(usb, resp, sizeof(resp));
+}
+
+static EFI_STATUS send_ext_blob_response(USB_TRANSPORT *usb, uint8_t app, uint8_t ext, uint16_t status, const uint8_t *data, UINTN data_len) {
+  uint8_t stack_resp[64];
+  uint8_t *resp = stack_resp;
+  EFI_STATUS st;
+  UINTN total = 12U + data_len;
+  if (total > sizeof(stack_resp)) {
+    resp = (uint8_t *)uefi_alloc(total);
+    if (!resp) {
+      return EFI_OUT_OF_RESOURCES;
+    }
   }
-  memset(resp, 0, sizeof(resp));
+  memset(resp, 0, total);
+  resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = app; resp[5] = ext;
+  wr_be16(resp + 6, status);
+  wr_be32(resp + 8, (uint32_t)data_len);
+  if (data_len) {
+    memcpy(resp + 12, data, data_len);
+  }
+  st = usb_transport_send(usb, resp, total);
+  if (resp != stack_resp) {
+    uefi_free(resp);
+  }
+  return st;
+}
+
+static EFI_STATUS send_fr_response(USB_TRANSPORT *usb, uint32_t param, uint16_t status, const uint8_t *data, UINTN data_len) {
+  uint8_t stack_resp[64];
+  uint8_t *resp = stack_resp;
+  EFI_STATUS st;
+  UINTN total = 17U + data_len;
+  if (total > sizeof(stack_resp)) {
+    resp = (uint8_t *)uefi_alloc(total);
+    if (!resp) {
+      return EFI_OUT_OF_RESOURCES;
+    }
+  }
+  memset(resp, 0, total);
   resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = 'F'; resp[5] = 'R';
   wr_be16(resp + 6, status);
   resp[8] = 0;
@@ -270,7 +311,11 @@ static EFI_STATUS send_fr_response(USB_TRANSPORT *usb, uint32_t param, uint16_t 
   if (data_len) {
     memcpy(resp + 17, data, data_len);
   }
-  return usb_transport_send(usb, resp, 17U + data_len);
+  st = usb_transport_send(usb, resp, total);
+  if (resp != stack_resp) {
+    uefi_free(resp);
+  }
+  return st;
 }
 
 static EFI_STATUS send_fw_response(USB_TRANSPORT *usb, uint32_t param, uint16_t status) {
@@ -281,6 +326,11 @@ static EFI_STATUS send_fw_response(USB_TRANSPORT *usb, uint32_t param, uint16_t 
   resp[8] = 0;
   wr_be32(resp + 9, param);
   return usb_transport_send(usb, resp, sizeof(resp));
+}
+
+static void wr_be64_local(uint8_t *p, uint64_t v) {
+  wr_be32(p, (uint32_t)(v >> 32));
+  wr_be32(p + 4, (uint32_t)v);
 }
 
 static UINTN info_add_block(uint8_t *resp, UINTN off, uint8_t id, const uint8_t *data, UINTN data_len) {
@@ -298,8 +348,8 @@ static UINTN info_add_u32(uint8_t *resp, UINTN off, uint8_t id, uint32_t value) 
   return info_add_block(resp, off, id, data, sizeof(data));
 }
 
-static EFI_STATUS send_v_info_response(USB_TRANSPORT *usb) {
-  uint8_t resp[96];
+static EFI_STATUS send_v_info_response(USB_TRANSPORT *usb, EFI_BLOCK_IO_PROTOCOL *bio) {
+  uint8_t resp[160];
   uint8_t data[12];
   UINTN off = 11;
   uint32_t write_size = UFP_MAX_PAYLOAD_DATA;
@@ -321,6 +371,10 @@ static EFI_STATUS send_v_info_response(USB_TRANSPORT *usb) {
 
   off = info_add_u32(resp, off, 1, (uint32_t)usb->max_transfer);
   off = info_add_u32(resp, off, 2, write_size);
+  if (bio && bio->Media) {
+    uint64_t sectors = bio->Media->LastBlock + 1U;
+    off = info_add_u32(resp, off, 3, sectors > 0xffffffffULL ? 0xffffffffU : (uint32_t)sectors);
+  }
 
   data[0] = 0;
   data[1] = 1;
@@ -334,7 +388,8 @@ static EFI_STATUS send_v_info_response(USB_TRANSPORT *usb) {
   data[5] = 0;
   data[6] = speed;
   data[7] = 0;
-  off = info_add_block(resp, off, 15, data, 8);
+  data[8] = 0xff;
+  off = info_add_block(resp, off, 15, data, 9);
 
   data[0] = 1;
   data[1] = 0;
@@ -344,13 +399,24 @@ static EFI_STATUS send_v_info_response(USB_TRANSPORT *usb) {
   off = info_add_block(resp, off, 16, data, 5);
 
   data[0] = 1;
+  data[1] = 0;
+  data[2] = 0;
+  data[3] = 0;
+  data[4] = 1;
+  data[5] = 0;
+  data[6] = 0;
+  data[7] = 0;
+  data[8] = 4;
+  off = info_add_block(resp, off, 32, data, 9);
+
+  data[0] = 1;
   off = info_add_block(resp, off, 37, data, 1);
 
   return usb_transport_send(usb, resp, off);
 }
 
-static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, const uint8_t *msg, UINTN len) {
-  uint8_t data[16];
+static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, EFI_BLOCK_IO_PROTOCOL *bio, const uint8_t *msg, UINTN len) {
+  uint8_t data[512];
   UINTN data_len = 0;
   uint16_t status = 0;
   uint32_t param;
@@ -365,6 +431,18 @@ static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, const uint8_t *msg, UINT
   memset(data, 0, sizeof(data));
 
   switch (param) {
+    case 0x41545250U: /* ATRP: reset protection support/version. */
+      data[0] = 0;
+      data[1] = 0;
+      data[2] = 0;
+      data[3] = 0;
+      data[4] = 1;
+      data[5] = 0;
+      data[6] = 0;
+      data[7] = 0;
+      data[8] = 1;
+      data_len = 9;
+      break;
     case 0x46414900U: /* FAI\0: UFP protocol/implementation version. */
       data[0] = 2;
       data[1] = 3;
@@ -383,12 +461,126 @@ static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, const uint8_t *msg, UINT
       data[0] = 1;
       data_len = 1;
       break;
+    case 0x4249544CU: /* BITL: BitLocker state. */
+      status = 2;
+      data[0] = 0;
+      data_len = 1;
+      break;
+    case 0x424E464FU: { /* BNFO: build info string. */
+      static const uint8_t build_info[] = "Date:- Time:- Info:-";
+      memcpy(data, build_info, sizeof(build_info));
+      data_len = sizeof(build_info);
+      break;
+    }
+    case 0x4355464FU: /* CUFO: current UEFI boot option. */
+      status = 2;
+      data[0] = 0;
+      data[1] = 0;
+      data_len = 2;
+      break;
+    case 0x44455300U: /* DES\0: directory entries size. */
+      status = 38;
+      wr_be64_local(data, 0);
+      data_len = 8;
+      break;
+    case 0x44504900U: /* DPI\0: platform id. */
+    case 0x44505200U: /* DPR\0: device properties. */
+    case 0x44544900U: /* DTI\0: device target info. */
+      status = 2;
+      break;
+    case 0x44545350U: /* DTSP: data verify speed. */
+      wr_be32(data, 0);
+      data_len = 4;
+      break;
+    case 0x44554900U: /* DUI\0: device id. */
+      status = 2;
+      data_len = 16;
+      break;
+    case 0x454D4D54U: /* EMMT: eMMC self-test result. */
+      status = 9;
+      break;
+    case 0x454D5300U: /* EMS\0: eMMC sector count. */
+      if (bio && bio->Media) {
+        uint64_t sectors = bio->Media->LastBlock + 1U;
+        wr_be32(data, sectors > 0xffffffffULL ? 0xffffffffU : (uint32_t)sectors);
+      } else {
+        status = 2;
+      }
+      data_len = 4;
+      break;
+    case 0x42460000U: /* BF\0\0: boot-flashing flag. */
+      data[0] = 0;
+      data_len = 1;
+      break;
+    case 0x464F0000U: /* FO\0\0: FFU configuration options. */
+      memcpy(data, g_ffu_options, sizeof(g_ffu_options));
+      data_len = 500;
+      break;
+    case 0x46530000U: /* FS\0\0: flashing status. */
+      wr_be32(data, 3);
+      data_len = 4;
+      break;
+    case 0x465A0000U: /* FZ\0\0: file size. */
+      status = 38;
+      wr_be64_local(data, 0);
+      data_len = 8;
+      break;
+    case 0x47534253U: /* GSBS: secure boot status. */
+      data[0] = 0;
+      data_len = 1;
+      break;
+    case 0x47554656U: /* GUFV: get UEFI variable value. */
+    case 0x47555653U: /* GUVS: get UEFI variable size. */
+      status = 10;
+      break;
+    case 0x4C474D52U: /* LGMR: largest memory region. */
+      status = 2;
+      wr_be64_local(data, 0);
+      data_len = 8;
+      break;
+    case 0x4C5A0000U: /* LZ\0\0: log size. */
+      if (len >= 16 && msg[15] != 1 && msg[15] != 2) {
+        status = 8;
+      }
+      wr_be64_local(data, 0);
+      data_len = 8;
+      break;
+    case 0x4D414300U: /* MAC\0: MAC address string. */
+      status = 8;
+      data_len = 1;
+      break;
+    case 0x4D4F4445U: /* MODE: transport/application mode. */
+      if (len >= 16 && msg[15] != 0) {
+        status = 11;
+      }
+      wr_be32(data, status ? 0 : g_mode_data);
+      data_len = 4;
+      break;
+    case 0x53445300U: /* SDS\0: SD/memory-card sector count. */
+      status = 10;
+      wr_be32(data, 0);
+      data_len = 4;
+      break;
     case 0x53465049U: /* SFPI: supported secure-FFU protocol bitmap. */
       value = 0x1f;
       data[0] = 1;
       data[1] = (uint8_t)(value >> 8);
       data[2] = (uint8_t)value;
       data_len = 6;
+      break;
+    case 0x534D4244U: /* SMBD: SMBIOS data. */
+      status = 2;
+      wr_be32(data, 0);
+      data_len = 4;
+      break;
+    case 0x534E0000U: /* SN\0\0: serial number GUID. */
+      status = 2;
+      data_len = 16;
+      break;
+    case 0x534F534DU: /* SOSM: system memory size. */
+      status = 9;
+      wr_be64_local(data, 0);
+      data_len = 8;
       break;
     case 0x53530000U: /* SS\0\0: summarized security/SFFU/USB capabilities. */
       data[0] = 3;
@@ -401,10 +593,25 @@ static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, const uint8_t *msg, UINT
       data[7] = 0;
       data_len = 8;
       break;
+    case 0x54454C53U: /* TELS: telemetry log size. */
+      wr_be32(data, 0);
+      data_len = 4;
+      break;
     case 0x54530000U: /* TS\0\0: transport receive transfer size. */
       value = (uint32_t)usb->max_transfer;
       wr_be32(data, value);
       data_len = 4;
+      break;
+    case 0x55424600U: /* UBF\0: current boot option enumeration. */
+    case 0x5545424FU: /* UEBO: enumerate UEFI boot options. */
+      status = 2;
+      wr_be32(data, 0);
+      wr_be32(data + 4, 0);
+      data_len = 8;
+      break;
+    case 0x554B4944U: /* UKID: unlock id. */
+    case 0x554B5446U: /* UKTF: unlock-token file list. */
+      status = 10;
       break;
     case 0x55534253U: /* USBS: current and maximum USB bus speed. */
       speed = (uint8_t)(usb->speed ? usb->speed : EfiUsbBusSpeedHigh);
@@ -412,6 +619,10 @@ static EFI_STATUS handle_read_param(USB_TRANSPORT *usb, const uint8_t *msg, UINT
       data[0] = speed;
       data[1] = max_speed;
       data_len = 2;
+      break;
+    case 0x706D0000U: /* pm\0\0: processor manufacturer. */
+      status = 2;
+      data_len = 1;
       break;
     case 0x57425300U: /* WBS\0: safe write-buffer payload size. */
       value = UFP_MAX_PAYLOAD_DATA;
@@ -440,10 +651,17 @@ static EFI_STATUS handle_write_param(USB_TRANSPORT *usb, const uint8_t *msg, UIN
     data_len = rd_be32(msg + 11);
   }
   switch (param) {
+    case 0x424F434CU: /* BOCL: boot-option optional data. */
+    case 0x424F4600U: /* BOF\0: move boot option first. */
+    case 0x424F4C00U: /* BOL\0: move boot option last. */
+    case 0x4F425500U: /* OBU\0: one-time boot option. */
+    case 0x53554656U: /* SUFV: set UEFI variable. */
+      return send_fw_response(usb, param, 4);
     case 0x464F0000U: /* FO\0\0: FFU configuration options. */
       if (len < 515 || data_len != 500) {
         return send_fw_response(usb, param, 8);
       }
+      memcpy(g_ffu_options, msg + 15, sizeof(g_ffu_options));
       return send_fw_response(usb, param, 0);
     case 0x4C490000U: { /* LI\0\0: log identifier. */
       UINTN actual = 0;
@@ -462,6 +680,7 @@ static EFI_STATUS handle_write_param(USB_TRANSPORT *usb, const uint8_t *msg, UIN
       if (len < 20 || msg[15] != 0) {
         return send_fw_response(usb, param, 11);
       }
+      g_mode_data = rd_be32(msg + 16) ? 1U : 0U;
       return send_fw_response(usb, param, 0);
     default:
       return send_fw_response(usb, param, 11);
@@ -548,6 +767,114 @@ static EFI_STATUS handle_get_gpt(USB_TRANSPORT *usb, EFI_BLOCK_IO_PROTOCOL *bio)
   return st;
 }
 
+static uint32_t efi_status_to_wire32(EFI_STATUS st) {
+  uint32_t low = (uint32_t)(st & 0xffffffffU);
+  if (EFI_ERROR(st)) {
+    return 0x80000000U | low;
+  }
+  return low;
+}
+
+static EFI_STATUS handle_unlock(USB_TRANSPORT *usb, const uint8_t *msg, UINTN len) {
+  uint8_t resp[14];
+  uint32_t request_version = 0;
+  uint32_t token_len = 0;
+  uint16_t status = 0;
+  EFI_STATUS op_status = EFI_SUCCESS;
+
+  if (len >= 10) {
+    request_version = rd_be32(msg + 6);
+  }
+  if (len >= 18) {
+    token_len = rd_be32(msg + 14);
+  }
+  if (len < 18 || request_version != 2) {
+    status = 5121;
+    op_status = EFI_UNSUPPORTED;
+  } else if ((uint64_t)token_len + 18U > (uint64_t)len) {
+    status = 5122;
+    op_status = EFI_INVALID_PARAMETER;
+  }
+  memset(resp, 0, sizeof(resp));
+  resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = 'F'; resp[5] = 'I';
+  wr_be16(resp + 8, status);
+  wr_be32(resp + 10, efi_status_to_wire32(op_status));
+  return usb_transport_send(usb, resp, sizeof(resp));
+}
+
+static EFI_STATUS handle_relock(USB_TRANSPORT *usb) {
+  uint8_t resp[10];
+  memset(resp, 0, sizeof(resp));
+  resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = 'F'; resp[5] = 'O';
+  wr_be32(resp + 6, 0);
+  return usb_transport_send(usb, resp, sizeof(resp));
+}
+
+static EFI_STATUS handle_read_empty_log(USB_TRANSPORT *usb, uint8_t ext, uint32_t requested_size) {
+  uint16_t status = 0;
+  if (requested_size > 0xffe3U || requested_size > usb->max_transfer) {
+    status = 48;
+  }
+  return send_ext_blob_response(usb, 'F', ext, status, 0, 0);
+}
+
+static EFI_STATUS handle_common_ext(USB_TRANSPORT *usb, const uint8_t *msg, UINTN len) {
+  uint8_t ext = len > 5 ? msg[5] : 0;
+  if (ext == 'B') {
+    uint8_t mode = len > 6 ? msg[6] : 0;
+    switch (mode) {
+      case 'R':
+      case 'T':
+      case 'U':
+      case 'W':
+      case 'Z':
+        return send_cb_response(usb, 0, 0);
+      default:
+        return send_cb_response(usb, 8, mode);
+    }
+  }
+  if (ext == 'C') {
+    return send_ext_status8(usb, 'C', 'C', 0);
+  }
+  if (ext == 'E') {
+    uint32_t echo_len = 0;
+    uint8_t stack_resp[64];
+    uint8_t *resp = stack_resp;
+    EFI_STATUS st;
+    UINTN out_len;
+    if (len >= 10) {
+      echo_len = rd_be32(msg + 6);
+      if ((uint64_t)echo_len > (uint64_t)len - 10U) {
+        echo_len = (uint32_t)(len - 10U);
+      }
+    }
+    out_len = 6U + echo_len;
+    if (out_len > sizeof(stack_resp)) {
+      resp = (uint8_t *)uefi_alloc(out_len);
+      if (!resp) {
+        return EFI_OUT_OF_RESOURCES;
+      }
+    }
+    resp[0] = 'N'; resp[1] = 'O'; resp[2] = 'K'; resp[3] = 'X'; resp[4] = 'C'; resp[5] = 'E';
+    if (echo_len) {
+      memcpy(resp + 6, msg + 10, echo_len);
+    }
+    st = usb_transport_send(usb, resp, out_len);
+    if (resp != stack_resp) {
+      uefi_free(resp);
+    }
+    return st;
+  }
+  if (ext == 'M') {
+    uint16_t display_id = len >= 8 ? rd_be16(msg + 6) : 0xffffU;
+    return send_ext_status8(usb, 'C', 'M', display_id < 5 ? 0 : 11);
+  }
+  if (ext == 'D' || ext == 'F' || ext == 'P') {
+    return send_ext_blob_response(usb, 'C', ext, 38, 0, 0);
+  }
+  return send_unknown_response(usb);
+}
+
 static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) {
   EFI_STATUS st;
   USB_TRANSPORT usb;
@@ -589,7 +916,14 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
       continue;
     }
     if (msg[3] == 'V') {
-      send_v_info_response(&usb);
+      send_v_info_response(&usb, bio);
+      continue;
+    }
+    if (msg[3] == 'R' || msg[3] == 'M' || msg[3] == 'Z') {
+      st = EFI_SUCCESS;
+      break;
+    }
+    if (msg[3] == 'S' || msg[3] == 'N') {
       continue;
     }
     if (msg[3] == 'T') {
@@ -604,10 +938,10 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
       send_unknown_response(&usb);
       continue;
     }
-    if (msg[4] == 'C' && msg[5] == 'B') {
-      uint8_t mode = len > 6 ? msg[6] : 0;
-      send_cb_response(&usb, 0, mode);
-      if (mode == 'R') {
+    if (msg[4] == 'C') {
+      uint8_t mode = (msg[5] == 'B' && len > 6) ? msg[6] : 0;
+      handle_common_ext(&usb, msg, len);
+      if (msg[5] == 'B' && mode == 'R') {
         con_puta("USB host requested reboot/switch. Exiting app."); con_crlf();
         st = EFI_SUCCESS;
         break;
@@ -615,11 +949,29 @@ static EFI_STATUS usb_secure_flash_loop(EFI_BLOCK_IO_PROTOCOL *bio, int commit) 
       continue;
     }
     if (msg[4] == 'F' && msg[5] == 'R') {
-      handle_read_param(&usb, msg, len);
+      handle_read_param(&usb, bio, msg, len);
       continue;
     }
     if (msg[4] == 'F' && msg[5] == 'W') {
       handle_write_param(&usb, msg, len);
+      continue;
+    }
+    if (msg[4] == 'F' && msg[5] == 'I') {
+      handle_unlock(&usb, msg, len);
+      continue;
+    }
+    if (msg[4] == 'F' && msg[5] == 'O') {
+      handle_relock(&usb);
+      continue;
+    }
+    if (msg[4] == 'F' && msg[5] == 'T') {
+      uint32_t requested = len >= 28 ? rd_be32(msg + 24) : 0;
+      handle_read_empty_log(&usb, 'T', requested);
+      continue;
+    }
+    if (msg[4] == 'F' && msg[5] == 'X') {
+      uint32_t requested = len >= 11 ? rd_be32(msg + 7) : 0;
+      handle_read_empty_log(&usb, 'X', requested);
       continue;
     }
     if (msg[4] == 'F' && msg[5] == 'F') {
